@@ -1,0 +1,13 @@
+# Data and Math
+pandas
+numpy
+yfinance
+
+# Technical Analysis and ML
+pandas-ta-classic
+scikit-learn
+statsmodels
+
+# Optimization and Charts
+PyPortfolioOpt
+matplotlib
