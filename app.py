@@ -9,3 +9,8 @@ if st.button('Analyze Stocks'):
     # We pass the 'years_back' variable into the engine function
     df = engine.get_market_data(years_back)
     st.dataframe(df)
+
+
+
+st.toggle("formula control", value=False, key=None, help=None, on_change=None, args=None, kwargs=None, *, disabled=False, label_visibility="visible", width="content")
+
