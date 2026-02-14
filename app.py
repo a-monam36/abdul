@@ -1,16 +1,66 @@
 import streamlit as st
-import momentum_engine as engine  # Importing your separate logic file
-
-# The slider stays here in the UI file
-years_back = st.sidebar.slider('Select Lookback Period (Years)', 2, 12, 8)
-
-# When the user clicks a button, call the logic from the other file
-if st.button('Analyze Stocks'):
-    # We pass the 'years_back' variable into the engine function
-    df = engine.get_market_data(years_back)
-    st.dataframe(df)
+import stocks
 
 
 
-st.toggle("formula control", value=False, key=None, help=None, on_change=None, args=None, kwargs=None, *, disabled=False, label_visibility="visible", width="content")
+st.set_page_config(page_title="Quant Strategy Sandbox", layout= "wide")
+st.title("🛠️ Strategy Feature Engine")
+
+st.sidebar.header("Toggle Indicators")
+
+use_gk = st.sidebar.toggle("Garman-Klass Volatility", value=True)
+
+use_rsi = st.sidebar.toggle("RSI (20 Day)", value= True )
+
+use_bb = st.sidebar.toggle("Bollinger Bands", value= True)
+
+use_atr = st.sidebar.toggle("ATR (14 Day)", value= True)
+
+use_macd = st.sidebar.toggle("MACD (20 Day)", value=True)
+
+st.sidebar.divider()
+
+run_pipeline = st.sidebar.button("Execute Pipeline")
+
+if run_pipeline:
+    with st.status("Processing Data...", expanded=True) as status:
+        st.write("Step 1: Downloading raw data...")
+
+        raw_df = stocks.get_sp500_data()
+
+        st.write("Step 2: Calculating selected indicators...")
+
+        featured_df = stocks.calculate_metrics(raw_df, 
+            use_rsi=use_rsi, 
+            use_bb=use_bb, 
+            use_atr=use_atr, 
+            use_macd=use_macd, 
+            use_gk=use_gk)
+        
+        st.write("Step 3: Filtering for top 150 liquid stocks...")
+        filtered_df = stocks.top_150_stocks(featured_df)
+
+        st.write("Step 4: Calculating monthly momentum returns...")
+        final_data = stocks.momentum(filtered_df)
+
+
+
+        status.update(label="Completed!", state="complete", expanded=False)
+
+        st.subheader("Results: top 150 most liquid stocks")
+
+        st.dataframe(final_data.tail(50), use_container_width=True)
+
+        csv = final_data.to_csv().encode('utf-8')
+        st.download_button(
+            label="📥 Download Processed Data",
+            data=csv,
+            file_name='quant_momentum_data.csv',
+            mime='text/csv',
+        )
+
+else:
+    st.warning("Click the 'Execute Pipeline' button in the sidebar to begin.")
+
+
 
