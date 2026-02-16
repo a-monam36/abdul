@@ -7,6 +7,12 @@ import pandas_ta_classic as pandas_ta
 import numpy as np
 import streamlit as st
 
+import pandas_datareader.data as web
+from statsmodels.regression.rolling import RollingOLS
+import statsmodels.api as sm
+from sklearn.cluster import KMeans
+
+
 
 @st.cache_data
 def get_sp500_data():
@@ -20,29 +26,29 @@ def get_sp500_data():
   start_date = pd.to_datetime(end_date) - pd.DateOffset(years=8)
 
 
-  df = yf.download(tickers= symbols_list, start=start_date, end=end_date, auto_adjust=False).stack()
+  factor_data = yf.download(tickers= symbols_list, start=start_date, end=end_date, auto_adjust=False).stack()
 
-  df.index.names = ['date', 'ticker']
+  factor_data.index.names = ['date', 'ticker']
 
-  df.columns = df.columns.str.lower()
+  factor_data.columns = factor_data.columns.str.lower()
   
-  return df
+  return factor_data
 
 
 
 
 #(STEP 2)
 
-def calculate_metrics(df, use_rsi, use_gk, use_bb, use_atr, use_macd):
+def calculate_metrics(factor_data, use_rsi, use_gk, use_bb, use_atr, use_macd):
 
 
   #garman klass vol
   if use_gk:
-    df['garman_klass_vol'] = ((np.log(df['high']) - np.log(df['low']))**2) /2 - (2*np.log(2) - 1)*((np.log(df['adj close']) - np.log(df['open']))**2)
+    factor_data['garman_klass_vol'] = ((np.log(factor_data['high']) - np.log(factor_data['low']))**2) /2 - (2*np.log(2) - 1)*((np.log(factor_data['adj close']) - np.log(factor_data['open']))**2)
 
   # rsi for 20 days
   if use_rsi:
-    df['rsi'] = df.groupby(level=1)['adj close'].transform(lambda x: pandas_ta.rsi(close=x, length=20))
+    factor_data['rsi'] = factor_data.groupby(level=1)['adj close'].transform(lambda x: pandas_ta.rsi(close=x, length=20))
 
   # bollinger bands for 20 days
   if use_bb:
@@ -51,11 +57,11 @@ def calculate_metrics(df, use_rsi, use_gk, use_bb, use_atr, use_macd):
 
       return bands.iloc[:, 0:3] # calculate high mid and low 
 
-    bbands_df = df.groupby(level=1, group_keys=False)['adj close'].apply(compute_bbands)
+    bbands_factor_data = factor_data.groupby(level=1, group_keys=False)['adj close'].apply(compute_bbands)
 
-    bbands_df.columns = ['bb_low', 'bb_mid', 'bb_high']
+    bbands_factor_data.columns = ['bb_low', 'bb_mid', 'bb_high']
 
-    df = df.join(bbands_df)
+    factor_data = factor_data.join(bbands_factor_data)
 
   # ATR for 14 days
   if use_atr:
@@ -74,7 +80,7 @@ def calculate_metrics(df, use_rsi, use_gk, use_bb, use_atr, use_macd):
 
       return atr.sub(atr.mean()).div(atr.std()) # (x- mean)/ sd = z 
 
-    df['atr'] = df.groupby(level=1, group_keys=False).apply(compute_atr)
+    factor_data['atr'] = factor_data.groupby(level=1, group_keys=False).apply(compute_atr)
 
   #macd for 20 days
   if use_macd:
@@ -82,26 +88,26 @@ def calculate_metrics(df, use_rsi, use_gk, use_bb, use_atr, use_macd):
         macd = pandas_ta.macd(close=close, length=20).iloc[:,0] # ignore histogram and signal just use macd
         return macd.sub(macd.mean()).div(macd.std())
 
-    df['macd'] = df.groupby(level=1, group_keys= False)['adj close'].apply(compute_macd)
+    factor_data['macd'] = factor_data.groupby(level=1, group_keys= False)['adj close'].apply(compute_macd)
 
   #dollar volume per million
-  df['dollar_volume'] = (df['adj close']*df['volume'])/1e6
+  factor_data['dollar_volume'] = (factor_data['adj close']*factor_data['volume'])/1e6
 
-  df = df.dropna()
+  factor_data = factor_data.dropna()
 
-  return df
+  return factor_data
 
 
 #(STEP 3)
 
-def top_150_stocks(df):
+def top_150_stocks(factor_data):
 
 
-  last_cols = [c for c in df.columns.unique(0) if c not in ['dollar_volume', 'volume', 'open',
+  last_cols = [c for c in factor_data.columns.unique(0) if c not in ['dollar_volume', 'volume', 'open',
                                                             'high', 'low', 'close']]
 
-  data = (pd.concat([df.unstack('ticker')['dollar_volume'].resample('ME').mean().stack('ticker').to_frame('dollar_volume'),
-                    df.unstack()[last_cols].resample('ME').last().stack('ticker')],
+  data = (pd.concat([factor_data.unstack('ticker')['dollar_volume'].resample('ME').mean().stack('ticker').to_frame('dollar_volume'),
+                    factor_data.unstack()[last_cols].resample('ME').last().stack('ticker')],
                     axis=1)).dropna() # make new columns that hold end of month data
 
   #calculating rolling average for 5 years
@@ -121,7 +127,7 @@ def top_150_stocks(df):
 #(STEP 4 )
 
 def momentum(data):
-  def calculate_returns(df):
+  def calculate_returns(factor_data):
 
       outlier_cutoff = 0.005
 
@@ -129,14 +135,14 @@ def momentum(data):
 
       for lag in lags:
 
-          df[f'return_{lag}m'] = (df['adj close']
+          factor_data[f'return_{lag}m'] = (factor_data['adj close']
                                 .pct_change(lag)
                                 .pipe(lambda x: x.clip(lower=x.quantile(outlier_cutoff),
                                                       upper=x.quantile(1-outlier_cutoff)))
                                 .add(1)
                                 .pow(1/lag)
                                 .sub(1))
-      return df
+      return factor_data
   
 
   data = data.groupby(level=1, group_keys = False).apply(calculate_returns).dropna()
@@ -145,31 +151,89 @@ def momentum(data):
   return data
 
 
+#(STEP 5)
+
+@st.cache_data
+def get_fama_french_factors(start_date='2010-01-01'):
+    ff_data = web.DataReader('F-F_Research_Data_5_Factors_2x3', 'famafrench', start=start_date)[0].drop('RF', axis=1)
+    ff_data.index = ff_data.index.to_timestamp()
+    ff_data = ff_data.resample('ME').last().div(100)
+    ff_data.index.name = 'date'
+    return ff_data
+
+def calculate_rolling_betas(data, factor_data):
+
+    joint_df = factor_data.join(data['return_1m']).dropna()
+    
+
+    num_regressors = 6 
+
+
+    observations = joint_df.groupby(level=1).size()
+    
+    valid_stocks = observations[observations > num_regressors]
+    joint_df = joint_df[joint_df.index.get_level_values('ticker').isin(valid_stocks.index)]
+
+    
+    def run_rolling_ols(x):
+        
+        actual_nobs = x.shape[0]
+        
+        current_window = min(24, actual_nobs)
+        
+       
+        if current_window <= num_regressors:
+            return pd.DataFrame(np.nan, index=x.index, columns=x.drop('return_1m', axis=1).columns)
+
+        return RollingOLS(
+            endog=x['return_1m'], 
+            exog=sm.add_constant(x.drop('return_1m', axis=1)),
+            window=current_window,
+            min_nobs=num_regressors + 1 
+        ).fit(params_only=True).params.drop('const', axis=1)
+
+    betas = joint_df.groupby(level=1, group_keys=False).apply(run_rolling_ols)
+    
+    
+    factors = ['Mkt-RF', 'SMB', 'HML', 'RMW', 'CMA']
+    data = data.join(betas.groupby('ticker').shift())
+    data.loc[:, factors] = data.groupby('ticker', group_keys=False)[factors].apply(lambda x: x.fillna(x.mean()))
+    
+    return data.dropna()
+
+
+
+
+
+
+
+
+
 
 
 # --- THE EXECUTION PART ---
 
-# 1. Download the data
-raw_data = get_sp500_data()
+if __name__ == "__main__":
 
-# 2. Run the math (Passing 'True' to turn on all the indicators)
-featured_data = calculate_metrics(
-    raw_data, 
-    use_rsi=True, 
-    use_gk=True, 
-    use_bb=True, 
-    use_atr=True, 
-    use_macd=True
-)
+    raw_data = get_sp500_data()
 
-# 3. Filter for the final leaderboard
-filtered_df = top_150_stocks(featured_data)
+    featured_data = calculate_metrics(
+        raw_data, 
+        use_rsi=True, 
+        use_gk=True, 
+        use_bb=True, 
+        use_atr=True, 
+        use_macd=True
+    )
 
-final_result = momentum(filtered_df)
-
-# 4. Look at the output
-print(final_result.tail())
-
+    filtered_factor_data = top_150_stocks(featured_data)
+    final_result = momentum(filtered_factor_data)
+    
+    
+    ff_factors = get_fama_french_factors()
+    final_result = calculate_rolling_betas(final_result, ff_factors)
+    
+    print(final_result.tail())
 
 
 

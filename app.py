@@ -18,6 +18,10 @@ use_atr = st.sidebar.toggle("ATR (14 Day)", value= True)
 
 use_macd = st.sidebar.toggle("MACD (20 Day)", value=True)
 
+use_ff = st.sidebar.toggle("Fama-French 5-Factors", value= True, help="Calculates rolling risk exposures (Market, Size, Value, Profitability, Investment")
+
+
+
 st.sidebar.divider()
 
 run_pipeline = st.sidebar.button("Execute Pipeline")
@@ -42,6 +46,15 @@ if run_pipeline:
 
         st.write("Step 4: Calculating monthly momentum returns...")
         final_data = stocks.momentum(filtered_df)
+        if use_ff:
+
+            st.write("Step 5: Estimating Fama-French Factor Betas...")
+
+            ff_factors = stocks.get_fama_french_factors(start_date='2010-01-01')
+
+            final_data = stocks.calculate_rolling_betas(final_data, ff_factors)
+
+
 
 
 
