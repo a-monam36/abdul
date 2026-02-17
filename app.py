@@ -54,26 +54,45 @@ if run_pipeline:
 
             final_data = stocks.calculate_rolling_betas(final_data, ff_factors)
 
+        
+        st.write("Step 6: Running K-Means Clustering...")
+        
+        final_data = stocks.calculate_clusters(final_data) 
 
-
-
-
+        st.write("Step 7: Generating Charts...")
+        all_charts = stocks.plot_all_clusters(final_data)
+        # save data in the memory
+        st.session_state.final_data = final_data
+        st.session_state.all_charts = all_charts
         status.update(label="Completed!", state="complete", expanded=False)
 
-        st.subheader("Results: top 150 most liquid stocks")
 
-        st.dataframe(final_data.tail(50), use_container_width=True)
+if st.session_state.final_data is not None:
+    
+    st.divider()
 
-        csv = final_data.to_csv().encode('utf-8')
-        st.download_button(
-            label="📥 Download Processed Data",
-            data=csv,
-            file_name='quant_momentum_data.csv',
-            mime='text/csv',
-        )
 
+    st.subheader("Results: Top 150 Most Liquid Stocks")
+    # Show the tail of the data from memory
+    st.dataframe(st.session_state.final_data.tail(50), use_container_width=True)
+
+    st.subheader("📅 Historical Cluster Evolution")
+    
+    # Use the charts from our memory
+    all_charts = st.session_state.all_charts
+    
+    # Now when you move this slider, the app reruns, but finds the data in session_state!
+    chart_index = st.slider("Move slider to see clusters over time", 0, len(all_charts)-1, len(all_charts)-1)
+    st.pyplot(all_charts[chart_index])
+
+    # Download Button also stays visible
+    csv = st.session_state.final_data.to_csv().encode('utf-8')
+    st.download_button(
+        label="📥 Download Processed Data",
+        data=csv,
+        file_name='quant_momentum_data.csv',
+        mime='text/csv',
+    )
 else:
+    # If the user hasn't clicked 'Execute' yet, show this warning
     st.warning("Click the 'Execute Pipeline' button in the sidebar to begin.")
-
-
-

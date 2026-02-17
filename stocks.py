@@ -11,6 +11,7 @@ import pandas_datareader.data as web
 from statsmodels.regression.rolling import RollingOLS
 import statsmodels.api as sm
 from sklearn.cluster import KMeans
+import matplotlib.pyplot as plt
 
 
 
@@ -201,6 +202,80 @@ def calculate_rolling_betas(data, factor_data):
     
     return data.dropna()
 
+
+#(STEP 6 kmeans clustering )
+
+initial_centroids = np.array([
+    # Cluster 0: "The Rocket Ships" (High Momentum + High Profitability)
+    # Target: Best for Growth Investors
+    [1.5, 1.2, 0.5, -0.5, 1.0, 0.0, 1.2], 
+
+    # Cluster 1: "The Deep Value Play" (Low RSI + High HML)
+    # Target: Best for Contrarian/Value Investors
+    [-0.5, 0.8, 0.2, 1.5, 0.2, 0.5, -1.5],
+
+    # Cluster 2: "The Defensive Giants" (Low Beta + High Quality)
+    # Target: Best for Conservative Investors (Safe Havens)
+    [0.2, 0.5, -1.0, 0.2, 1.2, 1.0, 0.0],
+
+    # Cluster 3: "The Underperformers" (Negative Momentum + High Volatility)
+    # Target: Stocks to AVOID
+    [-1.5, 1.5, 0.8, -0.2, -1.0, -0.5, -0.2]
+])
+
+def calculate_clusters(data):
+   
+  data = data.drop('cluster', axis=1, errors='ignore')
+  cluster_cols = ['return_1m', 'Mkt-RF', 'SMB', 'HML', 'RMW', 'CMA', 'rsi']
+  def get_clusters(df):
+      df['cluster'] = KMeans(n_clusters=4,
+                            random_state=0,
+                            init=initial_centroids).fit(df[cluster_cols]).labels_
+      return df
+
+  data = data.dropna().groupby('date', group_keys=False).apply(get_clusters)
+  return data
+
+
+
+plt.style.use('ggplot')
+
+def plot_all_clusters(data):
+    # This list will hold all the 'plates' (charts) we create
+    figures = []
+    
+    # --- YOUR LOOP LOGIC ---
+    # get_level_values('date') pulls all the dates from your MultiIndex
+    for i in data.index.get_level_values('date').unique().tolist():
+        
+        # 'g' is a 'Cross-Section' (xs) - it takes just the stocks for date 'i'
+        g = data.xs(i, level=0)
+        
+        # Create a new figure for each date
+        fig = plt.figure(figsize=(10, 6))
+        plt.title(f'Cluster Map: {i.strftime("%Y-%m-%d")}')
+        
+        # Call your existing logic
+        cluster_0 = g[g['cluster']==0]
+        cluster_1 = g[g['cluster']==1]
+        cluster_2 = g[g['cluster']==2]
+        cluster_3 = g[g['cluster']==3]
+
+        plt.scatter(cluster_0.iloc[:,0], cluster_0.iloc[:,6], color='red', label='Cluster 0')
+        plt.scatter(cluster_1.iloc[:,0], cluster_1.iloc[:,6], color='green', label='Cluster 1')
+        plt.scatter(cluster_2.iloc[:,0], cluster_2.iloc[:,6], color='blue', label='Cluster 2')
+        plt.scatter(cluster_3.iloc[:,0], cluster_3.iloc[:,6], color='black', label='Cluster 3')
+        
+        plt.legend()
+        plt.xlabel("Returns (1m)")
+        plt.ylabel("RSI (20d)")
+        
+        # Instead of plt.show(), save it to our list
+        figures.append(fig)
+        
+    return figures
+   
+   
 
 
 
