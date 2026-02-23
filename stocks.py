@@ -12,6 +12,11 @@ from statsmodels.regression.rolling import RollingOLS
 import statsmodels.api as sm
 from sklearn.cluster import KMeans
 import matplotlib.pyplot as plt
+import datetime as dt
+from pypfopt.efficient_frontier import EfficientFrontier
+from pypfopt import risk_models
+from pypfopt import expected_returns
+import matplotlib.ticker as mtick
 
 
 
@@ -274,6 +279,148 @@ def plot_all_clusters(data):
         figures.append(fig)
         
     return figures
+
+
+def select_stocks(data):
+
+# returns a dictionary of the stocks seleceted for each month using cluster 0 
+
+  filtered_df = data[data['cluster' == 0]]
+
+  filtered_df = filtered_df.reset_index(level=1)
+
+  filtered_df = filtered_df.index + pd.DateOffset(1)
+
+  filtered_df = filtered_df.reset_index().set_index(['date', 'ticker'])
+
+  dates = filtered_df.index.get_level_values('date').unique().tolist()
+
+  fixed_dates = {}
+
+  for d in dates:
+    fixed_dates[d.strftime('%Y-%m-%d')] = filtered_df.xs(d, level=0).index.tolist()
+
+  return fixed_dates
+
+
+
+
+def portfolio_optimization(data, fixed_dates):
+
+    def optimize_weights(prices, lower_bound=0):
+        # Calculate annualised expected returns and the annualised sample covariance matrix
+        returns = expected_returns.mean_historical_return(prices=prices, frequency=252)
+        covariance = risk_models.sample_cov(prices=prices, frequency=252)
+        
+        # Define the optimization problem with weight constraints (min: lower_bound, max: 10%)
+        ef = EfficientFrontier(expected_returns=returns, cov_matrix=covariance, weight_bounds=(lower_bound, 0.1), solver='SCS')
+        
+        # Optimize for the Maximum Sharpe Ratio
+        weights = ef.max_sharpe()
+        return ef.clean_weights()
+
+    # 1. Prepare Tickers and Date Range
+    stocks = data.index.get_level_values('ticker').unique().tolist()
+    start = data.index.get_level_values('date').unique()[0] - pd.DateOffset(months=12)
+    end = data.index.get_level_values('date').unique()[-1]
+    
+    # 2. Download Data
+    new_df = yf.download(tickers=stocks, start=start, end=end)
+
+
+    returns_df = np.log(new_df['Adj Close']).diff()
+    
+    portfolio_df = pd.DataFrame()
+
+   
+    for start_date in fixed_dates.keys():
+        try:
+            # Setup current trading month and look-back period
+            end_date = (pd.to_datetime(start_date) + pd.offsets.MonthEnd(0)).strftime('%Y-%m-%d')
+            cols = fixed_dates[start_date]
+            
+            optimization_start_date = (pd.to_datetime(start_date) - pd.DateOffset(months=12)).strftime('%Y-%m-%d')
+            optimization_end_date = (pd.to_datetime(start_date) - pd.DateOffset(days=1)).strftime('%Y-%m-%d')
+            
+            # Isolate the prices for optimization
+            optimization_df = new_df[optimization_start_date:optimization_end_date]['Adj Close'][cols]
+
+            success = False
+            try:
+                # Calculate weights using the Max Sharpe function
+                lb = round((1 / (len(optimization_df.columns) * 2)), 3)
+                weights = optimize_weights(prices=optimization_df, lower_bound=lb)
+                weights = pd.DataFrame(weights, index=pd.Series(0))
+                success = True
+            except Exception as e:
+                print(f'Max Sharpe Optimization failed for {start_date}, Continuing with Equal-Weights. Error: {e}')
+
+            # Fallback to Equal-Weights if optimization fails
+            if not success:
+                weights = pd.DataFrame([1/len(optimization_df.columns) for i in range(len(optimization_df.columns))], 
+                                         index=optimization_df.columns.tolist(), 
+                                         columns=pd.Series(0)).T
+
+            # 5. Performance Calculation
+            temp_df = returns_df[start_date:end_date][cols]
+            
+            # Align weights and returns via Stacking and Merging
+            temp_df = temp_df.stack().to_frame('return').reset_index(level=0) \
+                       .merge(weights.stack().to_frame('weight').reset_index(level=0, drop=True), 
+                              left_index=True, 
+                              right_index=True) \
+                       .reset_index().set_index(['Date', 'index']).unstack().stack()
+
+            temp_df.index.names = ['date', 'ticker']
+            
+            # Calculate daily weighted return
+            temp_df['weighted return'] = temp_df['return'] * temp_df['weight']
+
+            # Sum all individual stock returns to get the single daily Strategy Return
+            temp_df = temp_df.groupby(level=0)['weighted return'].sum().to_frame('Strategy Return')
+
+            # Append to the master portfolio dataframe
+            portfolio_df = pd.concat([portfolio_df, temp_df], axis=0)
+
+        except Exception as e:
+            print(f"Error processing {start_date}: {e}")
+
+    portfolio_df = portfolio_df.drop_duplicates()
+    return portfolio_df
+       
+       
+
+def portfolio_visual(portfolio_df):
+  spy = yf.download(tickers='SPY', start='2010-01-01', end=dt.date.today())
+  spy_ret = np.log(spy[['Adj Close']]).diff().dropna().rename({'Adj Close': 'SPY Buy&Hold'}, axis=1)
+
+  portfolio_df = portfolio_df.merge(spy_ret, left_index= True, right_index= True)
+
+  return portfolio_df
+
+def plot_port(portfolio_df):
+  plt.style.use('ggplot')
+  
+
+# convert back from log using exp -1 for proper perncentage
+  portfolio_cumulative_return = np.exp(portfolio_df.cumsum()) -1
+  portfolio_cumulative_return[:'2023-09-29'].plot(figsize=(16,6))
+  plt.title('Unsupervised Learning Trading Strategy Returns Over Time')
+
+  #
+  plt.gca().yaxis.set_major_formatter(mtick.PercentFormatter(1))
+  plt.ylabel('Return')
+  plt.show()
+
+
+
+        
+
+
+
+
+
+
    
    
 
