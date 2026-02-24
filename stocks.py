@@ -17,6 +17,7 @@ from pypfopt.efficient_frontier import EfficientFrontier
 from pypfopt import risk_models
 from pypfopt import expected_returns
 import matplotlib.ticker as mtick
+from sklearn.preprocessing import StandardScaler
 
 
 
@@ -54,7 +55,10 @@ def calculate_metrics(factor_data, use_rsi, use_gk, use_bb, use_atr, use_macd):
 
   # rsi for 20 days
   if use_rsi:
-    factor_data['rsi'] = factor_data.groupby(level=1)['adj close'].transform(lambda x: pandas_ta.rsi(close=x, length=20))
+    def compute_rsi(x):
+      rsi = pandas_ta.rsi(close=x, length=20)
+      return rsi.sub(rsi.mean()).div(rsi.std())
+    factor_data['rsi'] = factor_data.groupby(level=1)['adj close'].transform(compute_rsi)
 
   # bollinger bands for 20 days
   if use_bb:
@@ -133,7 +137,7 @@ def top_150_stocks(factor_data):
 #(STEP 4 )
 
 def momentum(data):
-  def calculate_returns(factor_data):
+  def calculate_returns(group_df):
 
       outlier_cutoff = 0.005
 
@@ -141,19 +145,17 @@ def momentum(data):
 
       for lag in lags:
 
-          factor_data[f'return_{lag}m'] = (factor_data['adj close']
+          group_df[f'return_{lag}m'] = (group_df['adj close']
                                 .pct_change(lag)
                                 .pipe(lambda x: x.clip(lower=x.quantile(outlier_cutoff),
                                                       upper=x.quantile(1-outlier_cutoff)))
                                 .add(1)
                                 .pow(1/lag)
                                 .sub(1))
-      return factor_data
+      return group_df
   
 
-  data = data.groupby(level=1, group_keys = False).apply(calculate_returns).dropna()
-  
-
+  data = data.groupby(level=1, group_keys=False).apply(calculate_returns).dropna()
   return data
 
 
@@ -203,7 +205,7 @@ def calculate_rolling_betas(data, factor_data):
     
     factors = ['Mkt-RF', 'SMB', 'HML', 'RMW', 'CMA']
     data = data.join(betas.groupby('ticker').shift())
-    data.loc[:, factors] = data.groupby('ticker', group_keys=False)[factors].apply(lambda x: x.fillna(x.mean()))
+    data.loc[:, factors] = data.groupby('ticker', group_keys=False)[factors].apply(lambda x: x.ffill().bfill())
     
     return data.dropna()
 
@@ -233,6 +235,8 @@ def calculate_clusters(data):
   data = data.drop('cluster', axis=1, errors='ignore')
   cluster_cols = ['return_1m', 'Mkt-RF', 'SMB', 'HML', 'RMW', 'CMA', 'rsi']
   def get_clusters(df):
+      scaler = StandardScaler()
+      df[cluster_cols] = scaler.fit_transform(df[cluster_cols])
       df['cluster'] = KMeans(n_clusters=4,
                             random_state=0,
                             init=initial_centroids).fit(df[cluster_cols]).labels_
@@ -282,89 +286,107 @@ def plot_all_clusters(data):
 
 
 def select_stocks(data):
+    # 1. Filter for Cluster 0
+    filtered_df = data[data['cluster'] == 0].copy()
+    
+    # 2. Reset ticker so it's a column, but keep date as the index
+    filtered_df = filtered_df.reset_index(level=1)
 
-# returns a dictionary of the stocks seleceted for each month using cluster 0 
+    # 3. Shift the date by 1 day (to avoid look-ahead bias)
+    # We apply this to the index itself
+    filtered_df.index = filtered_df.index + pd.DateOffset(days=1)
 
-  filtered_df = data[data['cluster' == 0]]
+    # 4. Re-establish the MultiIndex (date, ticker)
+    filtered_df = filtered_df.reset_index().set_index(['date', 'ticker'])
 
-  filtered_df = filtered_df.reset_index(level=1)
+    # 5. Get unique dates to iterate through
+    dates = filtered_df.index.get_level_values('date').unique().tolist()
 
-  filtered_df = filtered_df.index + pd.DateOffset(1)
+    fixed_dates = {}
 
-  filtered_df = filtered_df.reset_index().set_index(['date', 'ticker'])
+    for d in dates:
+        # Extract tickers for this specific date
+        fixed_dates[d.strftime('%Y-%m-%d')] = filtered_df.xs(d, level=0).index.tolist()
 
-  dates = filtered_df.index.get_level_values('date').unique().tolist()
-
-  fixed_dates = {}
-
-  for d in dates:
-    fixed_dates[d.strftime('%Y-%m-%d')] = filtered_df.xs(d, level=0).index.tolist()
-
-  return fixed_dates
-
+    return fixed_dates
 
 
 
-def portfolio_optimization(data, fixed_dates):
+def portfolio_optimization(data, fixed_dates, max_weight=0.1, lookback=12):
 
     def optimize_weights(prices, lower_bound=0):
-        # Calculate annualised expected returns and the annualised sample covariance matrix
         returns = expected_returns.mean_historical_return(prices=prices, frequency=252)
         covariance = risk_models.sample_cov(prices=prices, frequency=252)
         
-        # Define the optimization problem with weight constraints (min: lower_bound, max: 10%)
-        ef = EfficientFrontier(expected_returns=returns, cov_matrix=covariance, weight_bounds=(lower_bound, 0.1), solver='SCS')
+        # solver='SCS' is more robust for constrained problems
+        ef = EfficientFrontier(expected_returns=returns, cov_matrix=covariance, weight_bounds=(lower_bound, max_weight), solver='SCS')
         
-        # Optimize for the Maximum Sharpe Ratio
         weights = ef.max_sharpe()
         return ef.clean_weights()
 
     # 1. Prepare Tickers and Date Range
     stocks = data.index.get_level_values('ticker').unique().tolist()
-    start = data.index.get_level_values('date').unique()[0] - pd.DateOffset(months=12)
+    start = data.index.get_level_values('date').unique()[0] - pd.DateOffset(months=lookback)
     end = data.index.get_level_values('date').unique()[-1]
     
     # 2. Download Data
-    new_df = yf.download(tickers=stocks, start=start, end=end)
+    new_df = yf.download(tickers=stocks, start=start, end=end, auto_adjust=False)
 
+    # --- FIX 1: Handle MultiIndex Lowercasing safely ---
+    if isinstance(new_df.columns, pd.MultiIndex):
+        new_df.columns = new_df.columns.set_levels(new_df.columns.levels[0].str.lower(), level=0)
+    else:
+        new_df.columns = new_df.columns.str.lower()
+    
+    # Define which price column to use (usually 'adj close')
+    price_col = 'adj close' if 'adj close' in new_df.columns.get_level_values(0) else 'close'
 
-    returns_df = np.log(new_df['Adj Close']).diff()
+    # --- FIX 2: Calculate returns_df before the loop ---
+    # This is needed for the performance calculation later
+    returns_df = np.log(new_df[price_col]).diff()
     
     portfolio_df = pd.DataFrame()
 
-   
     for start_date in fixed_dates.keys():
         try:
             # Setup current trading month and look-back period
             end_date = (pd.to_datetime(start_date) + pd.offsets.MonthEnd(0)).strftime('%Y-%m-%d')
             cols = fixed_dates[start_date]
             
-            optimization_start_date = (pd.to_datetime(start_date) - pd.DateOffset(months=12)).strftime('%Y-%m-%d')
+            optimization_start_date = (pd.to_datetime(start_date) - pd.DateOffset(months=lookback)).strftime('%Y-%m-%d')
             optimization_end_date = (pd.to_datetime(start_date) - pd.DateOffset(days=1)).strftime('%Y-%m-%d')
             
-            # Isolate the prices for optimization
-            optimization_df = new_df[optimization_start_date:optimization_end_date]['Adj Close'][cols]
+            # --- FIX 3: Use the lowercase variable and valid columns check ---
+            available_tickers = new_df[price_col].columns.tolist()
+            valid_cols = [ticker for ticker in cols if ticker in available_tickers]
+
+            if len(valid_cols) < 2:
+                continue
+
+            # Isolate prices for optimization
+            optimization_df = new_df[optimization_start_date:optimization_end_date][price_col][valid_cols]
 
             success = False
             try:
-                # Calculate weights using the Max Sharpe function
+                # Calculate weights
                 lb = round((1 / (len(optimization_df.columns) * 2)), 3)
-                weights = optimize_weights(prices=optimization_df, lower_bound=lb)
-                weights = pd.DataFrame(weights, index=pd.Series(0))
+                weights_dict = optimize_weights(prices=optimization_df, lower_bound=lb)
+                weights = pd.DataFrame(weights_dict, index=pd.Series(0))
                 success = True
             except Exception as e:
-                print(f'Max Sharpe Optimization failed for {start_date}, Continuing with Equal-Weights. Error: {e}')
+                print(f'Max Sharpe Optimization failed for {start_date}: {e}')
 
-            # Fallback to Equal-Weights if optimization fails
+            # Fallback to Equal-Weights
             if not success:
                 weights = pd.DataFrame([1/len(optimization_df.columns) for i in range(len(optimization_df.columns))], 
                                          index=optimization_df.columns.tolist(), 
                                          columns=pd.Series(0)).T
 
             # 5. Performance Calculation
-            temp_df = returns_df[start_date:end_date][cols]
+            # We use valid_cols here to ensure we don't hit a KeyError
+            temp_df = returns_df[start_date:end_date][valid_cols]
             
-            # Align weights and returns via Stacking and Merging
+            # Align weights and returns
             temp_df = temp_df.stack().to_frame('return').reset_index(level=0) \
                        .merge(weights.stack().to_frame('weight').reset_index(level=0, drop=True), 
                               left_index=True, 
@@ -372,31 +394,51 @@ def portfolio_optimization(data, fixed_dates):
                        .reset_index().set_index(['Date', 'index']).unstack().stack()
 
             temp_df.index.names = ['date', 'ticker']
-            
-            # Calculate daily weighted return
             temp_df['weighted return'] = temp_df['return'] * temp_df['weight']
-
-            # Sum all individual stock returns to get the single daily Strategy Return
             temp_df = temp_df.groupby(level=0)['weighted return'].sum().to_frame('Strategy Return')
 
-            # Append to the master portfolio dataframe
             portfolio_df = pd.concat([portfolio_df, temp_df], axis=0)
 
         except Exception as e:
             print(f"Error processing {start_date}: {e}")
 
-    portfolio_df = portfolio_df.drop_duplicates()
+    return portfolio_df.drop_duplicates()   
+
+def portfolio_visual(portfolio_df, ticker):
+    # 1. Download the benchmark data
+    # We download from the start of your strategy data to the end
+    spy = yf.download(tickers=ticker, start=portfolio_df.index.min(), end=portfolio_df.index.max(), auto_adjust=False)
+
+    # Standardize column names to lowercase to avoid KeyErrors
+    if isinstance(spy.columns, pd.MultiIndex):
+        spy.columns = spy.columns.set_levels(spy.columns.levels[0].str.lower(), level=0)
+    else:
+        spy.columns = spy.columns.str.lower()
+
+    # 2. Isolate the price data safely
+    spy_prices = spy['adj close'] if 'adj close' in spy.columns else spy['close']
+
+    # 3. Calculate log returns
+    spy_ret = np.log(spy_prices).diff().dropna()
+
+    # 4. Handle Type (Fixes the AttributeError)
+    if isinstance(spy_ret, pd.Series):
+        spy_ret = spy_ret.to_frame('Market Benchmark')
+    else:
+        spy_ret.columns = ['Market Benchmark']
+
+    # 5. Resample to Monthly (Fixes the Empty Chart)
+    # This sums daily log returns into monthly ones to match your strategy
+    spy_ret = spy_ret.resample('ME').sum()
+
+    # 6. Ensure indexes are both Datetime objects for a clean merge
+    portfolio_df.index = pd.to_datetime(portfolio_df.index)
+    spy_ret.index = pd.to_datetime(spy_ret.index)
+
+    # 7. Final Merge (Use 'left' join to keep all strategy data)
+    portfolio_df = portfolio_df.merge(spy_ret, left_index=True, right_index=True, how='left')
+
     return portfolio_df
-       
-       
-
-def portfolio_visual(portfolio_df):
-  spy = yf.download(tickers='SPY', start='2010-01-01', end=dt.date.today())
-  spy_ret = np.log(spy[['Adj Close']]).diff().dropna().rename({'Adj Close': 'SPY Buy&Hold'}, axis=1)
-
-  portfolio_df = portfolio_df.merge(spy_ret, left_index= True, right_index= True)
-
-  return portfolio_df
 
 def plot_port(portfolio_df):
   plt.style.use('ggplot')
@@ -431,31 +473,6 @@ def plot_port(portfolio_df):
 
 
 
-
-
-# --- THE EXECUTION PART ---
-
-if __name__ == "__main__":
-
-    raw_data = get_sp500_data()
-
-    featured_data = calculate_metrics(
-        raw_data, 
-        use_rsi=True, 
-        use_gk=True, 
-        use_bb=True, 
-        use_atr=True, 
-        use_macd=True
-    )
-
-    filtered_factor_data = top_150_stocks(featured_data)
-    final_result = momentum(filtered_factor_data)
-    
-    
-    ff_factors = get_fama_french_factors()
-    final_result = calculate_rolling_betas(final_result, ff_factors)
-    
-    print(final_result.tail())
 
 
 
