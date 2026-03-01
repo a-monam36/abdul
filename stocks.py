@@ -382,20 +382,26 @@ def portfolio_optimization(data, fixed_dates, max_weight=0.1, lookback=12):
                                          index=optimization_df.columns.tolist(), 
                                          columns=pd.Series(0)).T
 
-            # 5. Performance Calculation
-            # We use valid_cols here to ensure we don't hit a KeyError
+# 5. Performance Calculation
             temp_df = returns_df[start_date:end_date][valid_cols]
-            
-            # Align weights and returns
-            temp_df = temp_df.stack().to_frame('return').reset_index(level=0) \
-                       .merge(weights.stack().to_frame('weight').reset_index(level=0, drop=True), 
-                              left_index=True, 
-                              right_index=True) \
-                       .reset_index().set_index(['Date', 'index']).unstack().stack()
 
-            temp_df.index.names = ['date', 'ticker']
-            temp_df['weighted return'] = temp_df['return'] * temp_df['weight']
-            temp_df = temp_df.groupby(level=0)['weighted return'].sum().to_frame('Strategy Return')
+            # Stack returns into long format
+            returns_long = temp_df.stack().to_frame('return')
+            returns_long.index.names = ['date', 'ticker']
+
+            # Stack weights into long format  
+            weights_long = weights.stack().to_frame('weight')
+            weights_long.index.names = ['row', 'ticker']
+            weights_long = weights_long.droplevel('row')
+
+            # Merge on ticker
+            returns_long = returns_long.reset_index()
+            weights_long = weights_long.reset_index()
+
+            merged = returns_long.merge(weights_long, on='ticker')
+            merged['weighted return'] = merged['return'] * merged['weight']
+
+            temp_df = merged.groupby('date')['weighted return'].sum().to_frame('Strategy Return')
 
             portfolio_df = pd.concat([portfolio_df, temp_df], axis=0)
 
@@ -404,58 +410,110 @@ def portfolio_optimization(data, fixed_dates, max_weight=0.1, lookback=12):
 
     return portfolio_df.drop_duplicates()   
 
-def portfolio_visual(portfolio_df, ticker):
-    # 1. Download the benchmark data
-    # We download from the start of your strategy data to the end
-    spy = yf.download(tickers=ticker, start=portfolio_df.index.min(), end=portfolio_df.index.max(), auto_adjust=False)
+# def portfolio_visual(portfolio_df, ticker):
+#     # 1. Download the benchmark data
+#     # We download from the start of your strategy data to the end
+#     spy = yf.download(tickers=ticker, start=portfolio_df.index.min(), end=portfolio_df.index.max(), auto_adjust=False)
 
-    # Standardize column names to lowercase to avoid KeyErrors
+#     # Standardize column names to lowercase to avoid KeyErrors
+#     if isinstance(spy.columns, pd.MultiIndex):
+#         spy.columns = spy.columns.set_levels(spy.columns.levels[0].str.lower(), level=0)
+#     else:
+#         spy.columns = spy.columns.str.lower()
+
+#     # 2. Isolate the price data safely
+#     spy_prices = spy['adj close'] if 'adj close' in spy.columns else spy['close']
+
+#     # 3. Calculate log returns
+#     spy_ret = np.log(spy_prices).diff().dropna()
+
+#     # 4. Handle Type (Fixes the AttributeError)
+#     if isinstance(spy_ret, pd.Series):
+#         spy_ret = spy_ret.to_frame('Market Benchmark')
+#     else:
+#         spy_ret.columns = ['Market Benchmark']
+
+#     # 5. Resample to Monthly (Fixes the Empty Chart)
+#     # This sums daily log returns into monthly ones to match your strategy
+#     spy_ret = spy_ret.resample('ME').sum()
+
+#     # 6. Ensure indexes are both Datetime objects for a clean merge
+#     portfolio_df.index = pd.to_datetime(portfolio_df.index).to_period('M').to_timestamp('M')
+#     spy_ret.index = pd.to_datetime(spy_ret.index).to_period('M').to_timestamp('M')
+
+#     # 7. Final Merge (Use 'left' join to keep all strategy data)
+#     portfolio_df = portfolio_df.merge(spy_ret, left_index=True, right_index=True, how='left')
+
+#     return portfolio_df
+
+def portfolio_visual(portfolio_df, ticker):
+    
+    # Resample daily strategy returns to monthly
+    portfolio_df.index = pd.to_datetime(portfolio_df.index)
+    portfolio_df = portfolio_df.resample('ME').sum()
+
+    start = portfolio_df.index.min()
+    end = portfolio_df.index.max()
+
+    spy = yf.download(tickers=ticker, start=start, end=end, auto_adjust=False)
+
     if isinstance(spy.columns, pd.MultiIndex):
         spy.columns = spy.columns.set_levels(spy.columns.levels[0].str.lower(), level=0)
     else:
         spy.columns = spy.columns.str.lower()
 
-    # 2. Isolate the price data safely
     spy_prices = spy['adj close'] if 'adj close' in spy.columns else spy['close']
+    spy_prices = spy_prices.squeeze()
 
-    # 3. Calculate log returns
-    spy_ret = np.log(spy_prices).diff().dropna()
-
-    # 4. Handle Type (Fixes the AttributeError)
-    if isinstance(spy_ret, pd.Series):
-        spy_ret = spy_ret.to_frame('Market Benchmark')
-    else:
-        spy_ret.columns = ['Market Benchmark']
-
-    # 5. Resample to Monthly (Fixes the Empty Chart)
-    # This sums daily log returns into monthly ones to match your strategy
+    # Daily log returns resampled to monthly
+    spy_ret = np.log(spy_prices / spy_prices.shift(1)).dropna()
     spy_ret = spy_ret.resample('ME').sum()
+    spy_ret = spy_ret.to_frame('Market Benchmark')
 
-    # 6. Ensure indexes are both Datetime objects for a clean merge
-    portfolio_df.index = pd.to_datetime(portfolio_df.index)
-    spy_ret.index = pd.to_datetime(spy_ret.index)
+    # Align both indexes to month-end
+    portfolio_df.index = portfolio_df.index + pd.offsets.MonthEnd(0)
+    spy_ret.index = spy_ret.index + pd.offsets.MonthEnd(0)
 
-    # 7. Final Merge (Use 'left' join to keep all strategy data)
-    portfolio_df = portfolio_df.merge(spy_ret, left_index=True, right_index=True, how='left')
+    portfolio_df = portfolio_df.merge(spy_ret, left_index=True, right_index=True, how='inner')
 
     return portfolio_df
 
 def plot_port(portfolio_df):
-  plt.style.use('ggplot')
-  
+    plt.style.use('ggplot')
 
-# convert back from log using exp -1 for proper perncentage
-  portfolio_cumulative_return = np.exp(portfolio_df.cumsum()) -1
-  portfolio_cumulative_return[:'2023-09-29'].plot(figsize=(16,6))
-  plt.title('Unsupervised Learning Trading Strategy Returns Over Time')
+    # Ensure index is datetime
+    portfolio_df.index = pd.to_datetime(portfolio_df.index)
 
-  #
-  plt.gca().yaxis.set_major_formatter(mtick.PercentFormatter(1))
-  plt.ylabel('Return')
-  plt.show()
+    # Drop any rows where ALL values are NaN
+    portfolio_df = portfolio_df.dropna(how='all')
 
+    # Sort by date ascending
+    portfolio_df = portfolio_df.sort_index()
 
+    # Rename columns cleanly for the legend
+    col_rename = {}
+    for col in portfolio_df.columns:
+        if 'strategy' in col.lower() or 'weighted' in col.lower():
+            col_rename[col] = 'Strategy Return'
+        elif 'market' in col.lower() or 'benchmark' in col.lower():
+            col_rename[col] = 'Market Benchmark'
+    portfolio_df = portfolio_df.rename(columns=col_rename)
 
+    # Cumulative return from log returns
+    portfolio_cumulative_return = np.exp(portfolio_df.cumsum()) - 1
+
+    fig, ax = plt.subplots(figsize=(16, 6))
+    portfolio_cumulative_return.plot(ax=ax, linewidth=1.5)
+
+    ax.set_title('Unsupervised Learning Trading Strategy Returns Over Time', fontsize=14)
+    ax.yaxis.set_major_formatter(mtick.PercentFormatter(1))
+    ax.set_ylabel('Return')
+    ax.set_xlabel('Date')
+    ax.legend(fontsize=11)
+    fig.autofmt_xdate(rotation=45)
+    fig.tight_layout()
+
+    return fig
         
 
 

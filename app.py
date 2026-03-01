@@ -133,18 +133,23 @@ if st.session_state.final_data is not None:
     if st.session_state.final_comparison is not None:
         st.divider()
         st.subheader(f"📈 Performance: Strategy vs. {select_label}")
+
+        with st.container(border=True):
+
+            fig = stocks.plot_port(st.session_state.final_comparison)
+            st.pyplot(fig)
         
-        perf_data = st.session_state.final_comparison
-        # Undo Log Returns for Cumulative Growth
-        cumulative_ret = np.exp(perf_data.cumsum()) - 1
+        # perf_data = st.session_state.final_comparison
+        # # Undo Log Returns for Cumulative Growth
+        # cumulative_ret = np.exp(perf_data.cumsum()) - 1
         
-        fig, ax = plt.subplots(figsize=(16, 7))
-        cumulative_ret.plot(ax=ax)
+        # fig, ax = plt.subplots(figsize=(16, 7))
+        # cumulative_ret.plot(ax=ax)
         
-        ax.set_title(f"Cumulative Return History", fontsize=14)
-        ax.yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
-        ax.set_ylabel("Growth (%)")
-        st.pyplot(fig)
+        # ax.set_title(f"Cumulative Return History", fontsize=14)
+        # ax.yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
+        # ax.set_ylabel("Growth (%)")
+        # st.pyplot(fig)
 
     # 4.3 Data and Download
     st.divider()
