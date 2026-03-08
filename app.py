@@ -4,6 +4,56 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
 import numpy as np
 
+import google.generativeai as genai
+
+from google.api_core import exceptions
+
+try:
+    GOOGLE_API_KEY = st.secrets["GEMINI_KEY"]
+except:
+    st.error("API Key not found! Make sure it is in .streamlit/secrets.toml")
+    st.stop()
+
+genai.configure(api_key=GOOGLE_API_KEY)
+MODEL_NAME = "gemini-2.0-flash"
+gen_model = genai.GenerativeModel(MODEL_NAME)
+
+
+def run_ai_advisor(final_data, weights, budget, risk, max_stocks):
+    try:
+        # 1. Prepare data (Keep it light to save tokens)
+        latest_weights = weights.iloc[0].sort_values(ascending=False).head(max_stocks)
+        tickers = latest_weights.index.tolist()
+
+        last_date = final_data.index.get_level_values('date')[-1]
+        # Rounding to 2 decimal places saves significant "tokens"
+        context_df = final_data.xs(last_date, level=0).loc[tickers][['rsi', 'Mkt-RF', 'SMB', 'HML']].round(2)
+
+        # 2. Construct Prompt
+        prompt = f"""
+        Analyze this Cluster 0 portfolio for a ${budget} investment ({risk} risk).
+        Weights: {latest_weights.to_dict()}
+        Technical Context: {context_df.to_dict()}
+        
+        Provide a 3-bullet point investment plan and a risk warning.
+        """
+
+        # 3. Call the model
+        response = gen_model.generate_content(prompt)
+        return response.text
+
+    except exceptions.ResourceExhausted:
+        # This catches the 429 error specifically
+        return "⚠️ **Rate Limit Reached:** Google's free tier is busy. Please wait 60 seconds and try again."
+    
+    except exceptions.ServiceUnavailable:
+        return "⚠️ **Server Overloaded:** Gemini is temporarily unavailable. Try again in a moment."
+    
+    except Exception as e:
+        # Catch-all for other issues (like internet connection)
+        return f"❌ **An unexpected error occurred:** {e}"
+    
+
 if 'final_data' not in st.session_state:
     st.session_state.final_data = None
 if 'all_charts' not in st.session_state:
@@ -54,9 +104,15 @@ benchmark_ticker = benchmark_options[select_label]
 
 
 
+
 st.sidebar.divider()
+st.sidebar.subheader("🤖 AI Advisor Settings")
+user_budget = st.sidebar.number_input("Investment Budget ($)", min_value=1000, value=10000, step=1000)
+user_risk = st.sidebar.selectbox("Risk Tolerance", ["Conservative", "Moderate", "Aggressive"], index=1)
+
 
 run_pipeline = st.sidebar.button("Execute Pipeline")
+
 
 if run_pipeline:
     with st.status("Processing Data...", expanded=True) as status:
@@ -101,15 +157,21 @@ if run_pipeline:
         fixed_dates = stocks.select_stocks(final_data)
 
         st.write("Step 9: Optimizing Portfolio & Backtesting...")
-        portfolio_results = stocks.portfolio_optimization(final_data, fixed_dates, max_weight = max_weight /100, lookback = lookback_months)
+        portfolio_results, latest_weights = stocks.portfolio_optimization(final_data, fixed_dates, max_weight = max_weight /100, lookback = lookback_months)
 
-        st.write("Step 10: Comparing against SPY Benchmark...")
+        st.session_state.latest_weights = latest_weights 
+        st.session_state.final_comparison = stocks.portfolio_visual(portfolio_results, benchmark_ticker)
+
+        st.write("Step 10: Comparing against Benchmark...")
         final_comparison = stocks.portfolio_visual(portfolio_results, benchmark_ticker)
+        st.session_state.final_comparison = final_comparison
+        st.session_state.latest_weights = latest_weights
 
 
 
         st.session_state.final_data = final_data
         st.session_state.all_charts = all_charts
+        st.session_state.portfolio_results = portfolio_results
         st.session_state.final_comparison = final_comparison
 
 
@@ -150,6 +212,23 @@ if st.session_state.final_data is not None:
         # ax.yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
         # ax.set_ylabel("Growth (%)")
         # st.pyplot(fig)
+
+
+    st.divider()
+    st.subheader("🤖 AI Portfolio Commentary")
+
+    with st.expander("Click to generate AI Investment Plan", expanded=True):
+        if st.button("Generate Advice"):
+            with st.spinner("Gemini is analyzing your engine's output..."):
+            # We use the session state data so we don't have to rerun the whole math engine
+                advice = run_ai_advisor(
+                    st.session_state.final_data, 
+                    st.session_state.latest_weights, # This contains the strategy returns/weights
+                    user_budget, 
+                    user_risk, 
+                    max_stocks=5 # Or use a fixed number of stocks
+                )
+                st.markdown(advice)
 
     # 4.3 Data and Download
     st.divider()

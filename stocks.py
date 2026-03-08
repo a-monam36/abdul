@@ -408,7 +408,7 @@ def portfolio_optimization(data, fixed_dates, max_weight=0.1, lookback=12):
         except Exception as e:
             print(f"Error processing {start_date}: {e}")
 
-    return portfolio_df.drop_duplicates()   
+    return portfolio_df.drop_duplicates(), weights 
 
 # def portfolio_visual(portfolio_df, ticker):
 #     # 1. Download the benchmark data
